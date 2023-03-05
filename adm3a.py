@@ -25,6 +25,7 @@ from collections import deque
 import threading
 import os
 import tkinter as tk
+import time
 
 
 class Terminal:
@@ -38,7 +39,7 @@ class Terminal:
     def clear(self):
         self.chars = list((32,) * self.height * self.width)
 
-    def clearline(self):
+    def clear_line(self):
         for x in range(self.width):
             self.chars[self.cury * self.width + x] = 32
 
@@ -81,16 +82,21 @@ class Terminal:
             self.chars[self.cury * self.width + self.curx] = character
             self.cursor_right()
 
+    def puts(self, string):
+        for character in bytearray(string.encode("ascii")):
+            self.putc(character)
+
     def cursor_start_of_line(self):
         self.curx = 0
 
     def update(self, rendercb):
+        ofs = 0
         for y in range(self.height):
             for x in range(self.width):
-                ofs = y * self.width + x
                 if self.visible[ofs] != self.chars[ofs]:
                     rendercb(x, y, self.chars[ofs])
                     self.visible[ofs] = self.chars[ofs]
+                ofs += 1
 
 
 class Adm3a(Terminal):
@@ -99,11 +105,16 @@ class Adm3a(Terminal):
         self.state = 0
         self.cy = 0
         self.answer_back = False
+        self.debug = False
 
     def output(self, character):
         if self.state == 0:
-            if character == 5:  # ctrl-E (ENQ)
+            if character < 2:
+                return
+            elif character == 5:  # ctrl-E (ENQ)
                 self.answer_back = True
+            elif character == 7:  # bell
+                return
             elif character == 8:  # BS
                 self.cursor_left()
             elif character == 10:  # LF
@@ -122,10 +133,29 @@ class Adm3a(Terminal):
                 self.home()
             elif character >= 32:
                 self.putc(character)
-        elif self.state == 1:
-            if character == ord(b"="):
-                self.state = 2
             else:
+                if self.debug:
+                    self.puts("<ctrl-")
+                    self.putc(character + 0x40)
+                    self.puts(">")
+        elif self.state == 1:
+            if character == ord(b"="):  # cursor position
+                self.state = 2
+            elif character == ord(b"*"):  # Soroc IQ120 clear to nulls
+                self.state = 0
+                self.clear()
+            elif character == ord(b"T"):  # Soroc IQ120 clear line
+                self.state = 0
+                self.clear_line()
+            else:
+                if self.debug:
+                    self.puts("<esc><")
+                    if character >= 32:
+                        self.putc(character)
+                    else:
+                        self.puts("ctrl-")
+                        self.putc(character + 0x40)
+                    self.puts(">")
                 self.state = 0
         elif self.state == 2:
             self.cy = character - 32
@@ -136,7 +166,7 @@ class Adm3a(Terminal):
 
 
 class Emulator(tk.Tk):
-    def __init__(self, serialport, baud=57600):
+    def __init__(self, serialport, baud=38400):
         super().__init__()
         self.configure(bg="black")
         self.resizable(False, False)
@@ -145,6 +175,7 @@ class Emulator(tk.Tk):
         self.cheight = 24
         self.cwidth = 13
         self.cursor_on = False
+        self.wordstarkeys = False
         self.canvas = tk.Canvas(
             self,
             width=self.terminal.width * self.cwidth,
@@ -159,7 +190,7 @@ class Emulator(tk.Tk):
         self.bitmaps = list((None,) * (self.terminal.width * self.terminal.height))
         self.terminal.update(self.render)
         self.rqueue = deque()
-        self.port = serial.Serial(serialport, baud, timeout=0.1)
+        self.port = serial.Serial(serialport, baud, timeout=0.3)
         self.rthread = threading.Thread(target=self._receiver, daemon=True)
         if self.rthread:
             self.rthread.start()
@@ -169,15 +200,47 @@ class Emulator(tk.Tk):
 
     def _receiver(self):
         while True:
-            s = self.port.read(self.port.in_waiting)
-            for c in s:
-                self.rqueue.append(c)
-            if s:
+            if self.port.in_waiting:
+                s = self.port.read(self.port.in_waiting)
+                for c in s:
+                    self.rqueue.append(c)
                 self.after(0, self.work)
+            else:
+                time.sleep(0.005)
 
     def keypress(self, event):
-        if event.char:
-            self.port.write(event.char.encode("utf8"))
+        # print(event)
+
+        if self.wordstarkeys:
+            if event.keysym == "Down":
+                self.port.write(b"\x18")
+            elif event.keysym == "Up":
+                self.port.write(b"\x05")
+            elif event.keysym == "Left":
+                self.port.write(b"\x13")
+            elif event.keysym == "Right":
+                self.port.write(b"\x04")
+            elif event.keysym == "Next":
+                self.port.write(b"\x03")
+            elif event.keysym == "Prior":
+                self.port.write(b"\x12")
+            elif event.keysym == "Home":
+                self.port.write(b"\x11s")
+            elif event.keysym == "End":
+                self.port.write(b"\x11d")
+            elif event.keysym == "BackSpace":
+                self.port.write(b"\x7f")
+            elif event.keysym == "Delete":
+                self.port.write(b"\x07")
+            elif event.keysym == "F12":
+                self.wordstarkeys = False
+            elif event.char:
+                self.port.write(event.char.encode("utf8"))
+        else:
+            if event.keysym == "F12":
+                self.wordstarkeys = True
+            elif event.char:
+                self.port.write(event.char.encode("utf8"))
 
     def work(self):
         if len(self.rqueue):
@@ -261,7 +324,7 @@ class Emulator(tk.Tk):
 
 
 if len(sys.argv) > 1:
-    emulator = Emulator(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else 57600)
+    emulator = Emulator(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else 38400)
     emulator.mainloop()
 else:
     print("Usage: python3 adm3a.py <serialdevice> [baudrate]")
